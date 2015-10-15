@@ -36,8 +36,11 @@ var empty_config = function() {
 	};
 };
 
+var empty_etags = function() {
+	return {};
+};
+
 var load_config = function(location) {
-	console.log(`Loading config ${location}`);
 	return new Promise(function(resolve, reject) {
 		fs.readFile(location, function(err, buffer) {
 			if (err && err.code === 'ENOENT') resolve(empty_config());
@@ -48,7 +51,6 @@ var load_config = function(location) {
 };
 
 var save_config = function(location, config) {
-	console.log(`Saving config ${location}`);
 	return new Promise(function(resolve, reject) {
 		fs.writeFile(location, JSON.stringify(config, null, "\t"), function(err, buffer) {
 			if (err) reject(err);
@@ -85,7 +87,8 @@ var filter_podcasts = function(podcasts, filter) {
 var load_etags = function load_etags(podcast) {
 	return new Promise(function(resolve, reject) {
 		fs.readFile(podcast.etags, function(err, buffer) {
-			if (err) reject(err);
+			if (err && err.code === 'ENOENT') resolve(empty_etags());
+			else if (err) reject(err);
 			else resolve(buffer ? JSON.parse(buffer.toString()) : {});
 		});
 	});
