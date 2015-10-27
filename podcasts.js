@@ -11,8 +11,73 @@ var sanitize = require('sanitize-filename');
 var CommandRouter = require('command-router');
 var cli = CommandRouter();
 
-cli.option({ name: 'config', alias: 'c' , default: "./config.json" , type: String});
-cli.option({ name: 'concurrent', default: 3 , type: Number});
+cli.option({ name: 'config', alias: 'c', default: "./config.json", type: String });
+cli.option({ name: 'concurrent', default: 3, type: Number });
+
+var ProcessState = function(p) {
+	this.text = "";
+	this.printing = p;
+};
+
+ProcessState.prototype.log = function log(msg) {
+	if (this.printing) console.log(msg);
+};
+
+var PodcastState = function(p, c, r) {
+	var podcast = p;
+	var children = c || [];
+	var refreshing = r;
+	
+	Object.defineProperty(this, 'podcast', {
+		get: function() {
+			return podcast ? Object.freeze(podcast) : null;
+		}
+	});
+	Object.defineProperty(this, 'children', {
+		get: function() {
+			return Object.freeze(children);
+		}
+	});
+	Object.defineProperty(this, 'refreshing', {
+		get: function() {
+			return refreshing;
+		}
+	});
+};
+
+PodcastState.prototype.print = function print() {
+	if (!this.refreshing) return;
+	if (this.finished) return;
+	var children = this.children;
+	var width = process.stdout.columns;
+	if (this.clear_screen) {
+		var blank = new Array(width).join(" ");
+		var O33 = "\033";
+		var reset = `${O33}[${children.length}A${O33}[${width}D`;
+		console.log(reset);
+		console.log("\033[2A");
+	} else {
+		this.clear_screen = true;
+	}
+	children.forEach(function(state) {
+		var text = state.text || "";
+		var substring = text.substring(0, width - 4);
+		console.log((substring == state.text ? state.text : substring + "...") + "\033[K");
+	});
+};
+
+PodcastState.prototype.start = function start() {
+	console.log(`Updating ${this.podcast.name}`);
+	if (this.refreshing) this.interval = setInterval(() => this.print(), 50);
+};
+
+PodcastState.prototype.finish = function finish(size) {
+	if (this.interval) clearInterval(this.interval);
+	this.print();
+	this.finished = true;
+	console.log(`Total size: ${prettysize(size)}`);
+	console.log("Done");
+};
 
 var splay = function splay(fn) {
 	return function(first) {
@@ -223,6 +288,7 @@ var download_remote_item = function download_remote_item(item, state) {
 						file.end();
 						item.size = size;
 						item.etag = etag;
+						state.log(`Saving etag ${etag} for ${item.title}`);
 						resolve(item);
 					});
 				}
@@ -244,6 +310,8 @@ var verify_local_item = function verify_local_item(item, stats, state) {
 		options.method = 'HEAD';
 		var request = http.get(options, function(response) {
 			var statusCode = response.statusCode;
+			state.log(`Found response with status ${statusCode}`);
+			state.log(`Validating etag ${item.etag} against ${response.headers.etag}`);
 			if (statusCode == 301 || statusCode == 302) {
 				item.src = response.headers.location;
 				resolve(verify_local_item(item, stats, state));
@@ -252,10 +320,12 @@ var verify_local_item = function verify_local_item(item, stats, state) {
 				reject(err);
 			} else if (item.etag == response.headers.etag) { 
 				state.text = `Cached ${item.title}`;
+				state.log(state.text);
 				item.size = stats.size;
 				resolve(item);
 			} else {
 				state.text = `Loading ${item.title}`;
+				state.log(state.text);
 				resolve(download_remote_item(item, state));
 			}
 		});
@@ -302,52 +372,17 @@ var process_items = function process_items(podcast, items, etags, processed, sta
 	});
 };
 
-var default_print_state = function default_print_state(states) {
-	return { states: states };
-};
-
-var start_state = function start_state() {
-	return {};
-};
-
-var print_state = function print_state(state) {
-	if (state.finished) return;
-	var states = state.states;
-	if (state.reset) {
-		var width = process.stdout.columns;
-		var blank = new Array(width).join(" ");
-		var O33 = "\033";
-		var reset = `${O33}[${states.length}A${O33}[${width}D`;
-		console.log(reset);
-		console.log("\033[2A");
-	} else {
-		state.reset = true;
-	}
-	states.forEach(function(state) {
-		var text = state.text || "";
-		var substring = text.substring(0, width - 4);
-		console.log((substring == state.text ? state.text : substring + "...") + "\033[K");
-	});
-};
-
 var observe_processes = function observe_processes(podcast, processes, etags, state) {
 	return new Promise(function(resolve, reject) {
-		console.log(`Updating ${podcast.name}`);
+		state.start();
 		Promise.all(processes).then(function(results) {
 			var items = results.reduce((array, add) => array.concat(add), []);
 			var size = items.reduce((sum, item) => sum + item.size, 0);
 			save_etags(podcast, etags, items).then(function() {
-				print_state(state);
-				state.finished = true;
-				console.log(`Total size: ${prettysize(size)}`);
-				console.log("Done");
+				state.finish(size);
 				resolve();
 			});
 		});
-		var interval = setInterval(function() {
-			if (state.finished) clearInterval(interval);
-			else print_state(state);
-		}, 50);
 	});
 };
 
@@ -355,9 +390,9 @@ var process_podcast = function process_podcast(podcast, episodes, etags) {
 	return new Promise(function(resolve, reject) {
 		var processed = [];
 		var items = transform_episode_list(episodes, etags);
-		var states = make_list(podcast.concurrent).map(i => start_state());
-		var processes = states.map(state => process_items(podcast, items, etags, processed, state));
-		var state = default_print_state(states);
+		var states = make_list(podcast.concurrent).map(i => new ProcessState(cli.options.verbose));
+		var state = new PodcastState(podcast, states, !cli.options.verbose);
+		var processes = state.children.map(state => process_items(podcast, items, etags, processed, state));
 		resolve(observe_processes(podcast, processes, etags, state));
 	});
 };
@@ -472,8 +507,8 @@ cli.command('update :name *', function() {
 });
 
 cli.command('refresh :podcast', function() {
-	var podcast = cli.params.podcast;
-	refresh(podcast);
+	var podcasts = cli.params.podcast.replace(/$\s+/g, "").replace(/\s+^/g, "").split(/\s+/g);
+	refresh(podcasts);
 });
 
 cli.command('refresh', function() {
