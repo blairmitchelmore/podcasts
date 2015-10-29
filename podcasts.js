@@ -12,6 +12,7 @@ var CommandRouter = require('command-router');
 var cli = CommandRouter();
 
 cli.option({ name: 'config', alias: 'c', default: "./config.json", type: String });
+cli.option({ name: 'strict', alias: 's', default: false, type: Boolean });
 cli.option({ name: 'concurrent', default: 3, type: Number });
 
 var ProcessState = function(p) {
@@ -257,7 +258,7 @@ var download_destination = function download_destination(podcast, item) {
 
 var download_remote_item = function download_remote_item(item, state) {
 	return new Promise(function(resolve, reject) {
-		var file = fs.createWriteStream(item.dest);
+		var file = fs.createWriteStream(item.tmp_dest);
 		file.on('open', function(fd) {
 			var request = http.get(item.src, function(response) {
 				var statusCode = response.statusCode;
@@ -280,16 +281,22 @@ var download_remote_item = function download_remote_item(item, state) {
 						size += chunk.length;
 						current += chunk.length;
 						percent = Math.floor(100 * current / total);
-						state.text = `Downloading ${item.title} ${percent}%`;
+						if (item.etag) state.text = `Etag mismatch (${etag} != ${item.etag}). Downloading ${item.title} ${percent}%`;
+						else state.text = `Downloading ${item.title} ${percent}%`;
 					}).on('error', function(err) {
 						file.end();
 						reject(err);
 					}).on('end', function() {
 						file.end();
-						item.size = size;
-						item.etag = etag;
-						state.log(`Saving etag ${etag} for ${item.title}`);
-						resolve(item);
+						fs.unlink(item.dest, function(err) {
+							fs.rename(item.tmp_dest, item.dest, function(err) {
+								if (err) return reject(err);
+								item.size = size;
+								item.etag = etag;
+								state.log(`Saving etag ${etag} for ${item.title}`);
+								resolve(item);
+							});
+						});
 					});
 				}
 			});
@@ -338,11 +345,17 @@ var verify_local_item = function verify_local_item(item, stats, state) {
 var refresh_item = function refresh_item(podcast, item, state) {
 	return new Promise(function(resolve, reject) {
 		item.dest = download_destination(podcast, item);
+		item.tmp_dest = [item.dest, 'tmp'].join('.');
 		fs.stat(item.dest, function(err, stats) {
 			if (err) {
 				resolve(download_remote_item(item, state));
-			} else {
+			} else if (cli.options.strict) {
 				resolve(verify_local_item(item, stats, state));
+			} else {
+				state.text = `Cached ${item.title}`;
+				state.log(state.text);
+				item.size = stats.size;
+				resolve(item);
 			}
 		});
 	});
